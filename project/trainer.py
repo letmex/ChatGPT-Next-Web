@@ -20,6 +20,16 @@ class TimeStepState:
     He: torch.Tensor
 
 
+@dataclass
+class QuadState:
+    xyt_q: torch.Tensor
+    w_q: torch.Tensor
+    d_prev: torch.Tensor
+    HI: torch.Tensor
+    HII: torch.Tensor
+    He: torch.Tensor
+
+
 class CoupledTrainer:
     def __init__(self, cfg: Config, domain: RectDomain):
         self.cfg = cfg
@@ -30,6 +40,11 @@ class CoupledTrainer:
 
         self.sampler = Sampler(domain, self.device)
         self.dt = (cfg.train.tf - cfg.train.t0) / cfg.train.num_time_steps
+
+        # Main state grid: sampled once and reused for all time steps.
+        q0, w0 = self.sampler.sample_quadrature(cfg.train.n_quadrature, cfg.train.t0)
+        zeros = torch.zeros((q0.shape[0], 1), device=self.device)
+        self.quad_state = QuadState(xyt_q=q0, w_q=w0, d_prev=zeros.clone(), HI=zeros.clone(), HII=zeros.clone(), He=zeros.clone())
 
     def _build_batch(self, t: float) -> Dict[str, torch.Tensor]:
         c = self.cfg.train
@@ -65,24 +80,27 @@ class CoupledTrainer:
 
         optimizer.step(closure)
 
+    def _phasefield_batch(self, t: float) -> Dict[str, torch.Tensor]:
+        # Keep phase-field/history variables on a fixed quadrature grid.
+        # If adaptive refinement is added later, temporary points should be used
+        # only for loss estimation without overriding this main state grid.
+        q_fixed = self.quad_state.xyt_q.clone()
+        q_fixed[:, 2] = t
+        return {"quad": q_fixed, "w_q": self.quad_state.w_q}
+
     def train(self):
         mat = self.cfg.material
         c = self.cfg.train
-
-        # Background quadrature state for history variables
-        q0, _ = self.sampler.sample_quadrature(c.n_quadrature, c.t0)
-        HI = torch.zeros((q0.shape[0], 1), device=self.device)
-        HII = torch.zeros((q0.shape[0], 1), device=self.device)
-        d_prev = torch.zeros((q0.shape[0], 1), device=self.device)
 
         history = []
 
         for n in range(c.num_time_steps):
             t_np1 = c.t0 + (n + 1) * self.dt
             batch = self._build_batch(t_np1)
+            pf_batch = self._phasefield_batch(t_np1)
 
             # Step 1: train thermo-mechanical net with frozen d^n
-            d_tm = d_prev
+            d_tm = self.quad_state.d_prev
 
             opt_tu_adam = torch.optim.Adam(self.net_tu.parameters(), lr=c.adam_lr)
 
@@ -95,13 +113,18 @@ class CoupledTrainer:
             self._run_lbfgs(opt_tu_lbfgs, tu_loss_fn)
 
             # Step 2: update history on quadrature points
-            HI, HII, He = update_history_fields(self.net_tu, batch["quad"], HI, HII, mat)
+            HI, HII, He = update_history_fields(
+                self.net_tu, pf_batch["quad"], self.quad_state.HI, self.quad_state.HII, mat
+            )
+            self.quad_state.HI = HI
+            self.quad_state.HII = HII
+            self.quad_state.He = He
 
             # Step 3: train phase-field net with fixed H_e^{n+1}
             opt_d_adam = torch.optim.Adam(self.net_d.parameters(), lr=c.adam_lr)
 
             def d_loss_fn():
-                loss, _ = phasefield_loss(self.net_d, batch, d_prev, He, mat, self.dt)
+                loss, _ = phasefield_loss(self.net_d, pf_batch, self.quad_state.d_prev, self.quad_state.He, mat, self.dt)
                 return loss
 
             self._run_adam(opt_d_adam, d_loss_fn, c.adam_epochs_d)
@@ -109,10 +132,20 @@ class CoupledTrainer:
             self._run_lbfgs(opt_d_lbfgs, d_loss_fn)
 
             with torch.no_grad():
-                _, d_new = phasefield_loss(self.net_d, batch, d_prev, He, mat, self.dt)
+                _, d_new = phasefield_loss(
+                    self.net_d, pf_batch, self.quad_state.d_prev, self.quad_state.He, mat, self.dt
+                )
 
             # Step 4: store and pass to next step
-            d_prev = d_new.detach()
-            history.append(TimeStepState(t=t_np1, d_q=d_prev, HI=HI, HII=HII, He=He))
+            self.quad_state.d_prev = d_new.detach()
+            history.append(
+                TimeStepState(
+                    t=t_np1,
+                    d_q=self.quad_state.d_prev,
+                    HI=self.quad_state.HI,
+                    HII=self.quad_state.HII,
+                    He=self.quad_state.He,
+                )
+            )
 
         return history
