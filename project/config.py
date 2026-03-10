@@ -65,9 +65,3 @@ class Config:
     train: TrainConfig = field(default_factory=TrainConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     load: LoadConfig = field(default_factory=LoadConfig)
-
-    @classmethod
-    def from_case(cls, case: str) -> "Config":
-        if case == "comsol_baseline":
-            return cls(material=MaterialConfig())
-        raise ValueError(f"Unknown config case: {case}")
