@@ -41,6 +41,7 @@ class TrainConfig:
     n_boundary: int = 1000
     n_initial: int = 2000
     n_quadrature: int = 4000
+    irreversibility: str = "output_transform"
 
 
 @dataclass

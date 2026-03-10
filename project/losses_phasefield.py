@@ -7,10 +7,22 @@ def irreversible_transform(d_hat: torch.Tensor, d_prev: torch.Tensor) -> torch.T
     return d_prev + (1.0 - d_prev) * torch.sigmoid(d_hat)
 
 
-def phasefield_incremental_energy(net_d, xyt_q, w_q, d_prev, He, mat, dt):
+def history_only_transform(d_hat: torch.Tensor) -> torch.Tensor:
+    return torch.clamp(d_hat, min=0.0, max=1.0)
+
+
+def apply_irreversibility(d_hat: torch.Tensor, d_prev: torch.Tensor, strategy: str) -> torch.Tensor:
+    if strategy == "output_transform":
+        return irreversible_transform(d_hat, d_prev)
+    if strategy == "history_only":
+        return history_only_transform(d_hat)
+    raise ValueError(f"Unsupported irreversibility strategy: {strategy}")
+
+
+def phasefield_incremental_energy(net_d, xyt_q, w_q, d_prev, He, mat, dt, irreversibility: str = "output_transform"):
     xyt_q = xyt_q.requires_grad_(True)
     d_hat = net_d(xyt_q)
-    d = irreversible_transform(d_hat, d_prev)
+    d = apply_irreversibility(d_hat, d_prev, irreversibility)
 
     gd = degradation(d, mat.kappa)
     gd_term = gd * He
@@ -26,5 +38,14 @@ def phasefield_incremental_energy(net_d, xyt_q, w_q, d_prev, He, mat, dt):
     return Pi_d, d
 
 
-def phasefield_loss(net_d, batch, d_prev, He, mat, dt):
-    return phasefield_incremental_energy(net_d, batch["quad"], batch["w_q"], d_prev, He, mat, dt)
+def phasefield_loss(net_d, batch, d_prev, He, mat, dt, irreversibility: str = "output_transform"):
+    return phasefield_incremental_energy(
+        net_d,
+        batch["quad"],
+        batch["w_q"],
+        d_prev,
+        He,
+        mat,
+        dt,
+        irreversibility=irreversibility,
+    )
