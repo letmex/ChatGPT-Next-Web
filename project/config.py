@@ -4,22 +4,28 @@ from typing import Dict, Tuple
 
 @dataclass
 class MaterialConfig:
+    # COMSOL baseline (SI units)
     E: float = 70e9
     nu: float = 0.33
-    alpha: float = 2.3e-5
+    alpha: float = 23e-6
     rho: float = 2700.0
     c_p: float = 900.0
     k0: float = 180.0
     T_ref: float = 273.15
 
-    GcI: float = 1.0
-    GcII: float = 2.0
+    # Gf0 = 0.0024 MPa*mm = 2.4 N/m (SI)
+    GcI: float = 2.4
+    xi: float = 1.0
+    GcII: float | None = None
     l0: float = 1e-3
     eta_pf: float = 1e-4
     kappa: float = 1e-8
     eps_r: float = 1e-5
 
-    Q: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.GcII is None:
+            self.GcII = 2.0 * (1.0 + self.nu) * (self.xi**2) * self.GcI
 
 
 @dataclass
@@ -43,6 +49,11 @@ class TrainConfig:
     n_initial: int = 2000
     n_quadrature: int = 4000
     irreversibility: str = "output_transform"
+
+
+@dataclass
+class LoadConfig:
+    Q: float = 0.0
 
 
 @dataclass
