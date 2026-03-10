@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Dict
 
 import torch
 
@@ -13,6 +14,8 @@ class RectDomain:
 
 class Sampler:
     """Sampling helper for interior, boundary and quadrature points."""
+
+    BOUNDARY_TAG_TO_ID: Dict[str, int] = {"left": 0, "right": 1, "bottom": 2, "top": 3}
 
     def __init__(self, domain: RectDomain, device: torch.device):
         self.domain = domain
@@ -43,7 +46,17 @@ class Sampler:
 
         xy = torch.cat([left, right, bottom, top], dim=0)
         tt = torch.full((xy.shape[0], 1), float(t), device=self.device)
-        return torch.cat([xy, tt], dim=1)
+
+        labels = torch.cat(
+            [
+                torch.full((n_side, 1), self.BOUNDARY_TAG_TO_ID["left"], device=self.device, dtype=torch.long),
+                torch.full((n_side, 1), self.BOUNDARY_TAG_TO_ID["right"], device=self.device, dtype=torch.long),
+                torch.full((n_side, 1), self.BOUNDARY_TAG_TO_ID["bottom"], device=self.device, dtype=torch.long),
+                torch.full((n_side, 1), self.BOUNDARY_TAG_TO_ID["top"], device=self.device, dtype=torch.long),
+            ],
+            dim=0,
+        )
+        return torch.cat([xy, tt], dim=1), labels
 
     def sample_quadrature(self, n: int, t: float):
         # Simple MC quadrature points + unit weights scaled by area
