@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from inspect import signature
-from typing import Callable, Dict
+from typing import Callable, Dict, Tuple
 
 import torch
 
@@ -63,7 +63,7 @@ class CoupledTrainer:
         if thermal_cfg is None:
             return torch.zeros_like(t)
 
-        curve = getattr(thermal_cfg, "heating_curve", [])
+        curve = sorted(getattr(thermal_cfg, "heating_curve", []), key=lambda pair: pair[0])
         initial_temperature = float(getattr(thermal_cfg, "initial_temperature", 0.0))
         if len(curve) == 0:
             return torch.full_like(t, initial_temperature)
@@ -139,7 +139,7 @@ class CoupledTrainer:
                 u_target[mask, 1] = u0[1]
         return u_target
 
-    def _sample_boundary_with_optional_labels(self, n: int, t: float):
+    def _sample_boundary_with_optional_labels(self, n: int, t: float) -> Tuple[torch.Tensor, torch.Tensor | None]:
         sample = self.sampler.sample_boundary(n, t)
         if isinstance(sample, tuple):
             return sample
