@@ -58,7 +58,7 @@ class CoupledTrainer:
             He=zeros.clone(),
         )
 
-    def _sample_boundary(self, n: int, t: float):
+    def _sample_boundary(self, n: int, t: float) -> tuple[torch.Tensor, torch.Tensor | None]:
         sample = self.sampler.sample_boundary(n, t)
         if isinstance(sample, tuple):
             return sample
@@ -77,17 +77,17 @@ class CoupledTrainer:
         if len(curve) == 1:
             return torch.full_like(t, float(curve[0][1]))
 
-        t_out = torch.empty_like(t)
-        t_out[t <= curve[0][0]] = float(curve[0][1])
+        t_out = torch.full_like(t, float(curve[0][1]))
+        t_out[t >= curve[-1][0]] = float(curve[-1][1])
 
         for i in range(len(curve) - 1):
             ta, va = curve[i]
             tb, vb = curve[i + 1]
-            seg = (t >= ta) & (t <= tb)
-            ratio = (t[seg] - ta) / max(tb - ta, 1e-12)
-            t_out[seg] = va + ratio * (vb - va)
+            seg = (t >= ta) & (t < tb)
+            if torch.any(seg):
+                ratio = (t[seg] - ta) / max(tb - ta, 1e-12)
+                t_out[seg] = va + ratio * (vb - va)
 
-        t_out[t >= curve[-1][0]] = float(curve[-1][1])
         return t_out
 
     def _default_temperature_bc_fn(self, xyt_bc: torch.Tensor, bc_labels: torch.Tensor | None) -> torch.Tensor:
