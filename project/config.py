@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from typing import Dict, Tuple
 
 
 @dataclass
@@ -9,7 +10,7 @@ class MaterialConfig:
     rho: float = 2700.0
     c_p: float = 900.0
     k0: float = 180.0
-    T_ref: float = 293.15
+    T_ref: float = 273.15
 
     GcI: float = 1.0
     GcII: float = 2.0
@@ -49,7 +50,31 @@ class RuntimeConfig:
 
 
 @dataclass
+class ThermalLoadConfig:
+    initial_temperature: float = 573.15
+    # Piecewise-linear temperature-time curve [(t, T), ...]
+    heating_curve: Tuple[Tuple[float, float], ...] = ((0.0, 573.15), (1.0, 573.15))
+    thermal_bc_tags: Tuple[str, ...] = ("top",)
+
+
+@dataclass
+class MechanicalLoadConfig:
+    # Boundary tag -> constrained directions (x, y)
+    displacement_constraints: Dict[str, Tuple[bool, bool]] = field(
+        default_factory=lambda: {"left": (True, False), "bottom": (False, True)}
+    )
+    prescribed_displacement: Tuple[float, float] = (0.0, 0.0)
+
+
+@dataclass
+class LoadConfig:
+    thermal: ThermalLoadConfig = field(default_factory=ThermalLoadConfig)
+    mechanical: MechanicalLoadConfig = field(default_factory=MechanicalLoadConfig)
+
+
+@dataclass
 class Config:
     material: MaterialConfig = field(default_factory=MaterialConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
+    load: LoadConfig = field(default_factory=LoadConfig)
