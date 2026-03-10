@@ -40,19 +40,34 @@ class CoupledTrainer:
 
         self.sampler = Sampler(domain, self.device)
         self.dt = (cfg.train.tf - cfg.train.t0) / cfg.train.num_time_steps
+        self.irreversibility = getattr(cfg.train, "irreversibility", True)
 
         # Main state grid: sampled once and reused for all time steps.
         q0, w0 = self.sampler.sample_quadrature(cfg.train.n_quadrature, cfg.train.t0)
         zeros = torch.zeros((q0.shape[0], 1), device=self.device)
-        self.quad_state = QuadState(xyt_q=q0, w_q=w0, d_prev=zeros.clone(), HI=zeros.clone(), HII=zeros.clone(), He=zeros.clone())
+        self.quad_state = QuadState(
+            xyt_q=q0,
+            w_q=w0,
+            d_prev=zeros.clone(),
+            HI=zeros.clone(),
+            HII=zeros.clone(),
+            He=zeros.clone(),
+        )
 
     def _build_batch(self, t: float) -> Dict[str, torch.Tensor]:
         c = self.cfg.train
+
+        bc_T_sample = self.sampler.sample_boundary(c.n_boundary, t)
+        bc_u_sample = self.sampler.sample_boundary(c.n_boundary, t)
+        bc_T = bc_T_sample[0] if isinstance(bc_T_sample, tuple) else bc_T_sample
+        bc_u = bc_u_sample[0] if isinstance(bc_u_sample, tuple) else bc_u_sample
+        xyt_init = self.sampler.sample_initial(c.n_initial, self.cfg.train.t0)
+
         batch = {
             "domain": self.sampler.sample_domain(c.n_domain, t),
-            "bc_T": self.sampler.sample_boundary(c.n_boundary, t),
-            "bc_u": self.sampler.sample_boundary(c.n_boundary, t),
-            "init": self.sampler.sample_initial(c.n_initial, self.cfg.train.t0),
+            "bc_T": bc_T,
+            "bc_u": bc_u,
+            "init": xyt_init,
         }
         q, w_q = self.sampler.sample_quadrature(c.n_quadrature, t)
         batch["quad"] = q
@@ -88,6 +103,21 @@ class CoupledTrainer:
         q_fixed[:, 2] = t
         return {"quad": q_fixed, "w_q": self.quad_state.w_q}
 
+    def _phasefield_loss(self, batch: Dict[str, torch.Tensor], d_prev: torch.Tensor, He: torch.Tensor):
+        try:
+            return phasefield_loss(
+                self.net_d,
+                batch,
+                d_prev,
+                He,
+                self.cfg.material,
+                self.dt,
+                irreversibility=self.irreversibility,
+            )
+        except TypeError:
+            # Backward compatibility with phasefield_loss without irreversibility keyword.
+            return phasefield_loss(self.net_d, batch, d_prev, He, self.cfg.material, self.dt)
+
     def train(self):
         mat = self.cfg.material
         c = self.cfg.train
@@ -112,7 +142,7 @@ class CoupledTrainer:
             opt_tu_lbfgs = torch.optim.LBFGS(self.net_tu.parameters(), max_iter=c.lbfgs_iters_tu)
             self._run_lbfgs(opt_tu_lbfgs, tu_loss_fn)
 
-            # Step 2: update history on quadrature points
+            # Step 2: update history on fixed quadrature points
             HI, HII, He = update_history_fields(
                 self.net_tu, pf_batch["quad"], self.quad_state.HI, self.quad_state.HII, mat
             )
@@ -124,7 +154,7 @@ class CoupledTrainer:
             opt_d_adam = torch.optim.Adam(self.net_d.parameters(), lr=c.adam_lr)
 
             def d_loss_fn():
-                loss, _ = phasefield_loss(self.net_d, pf_batch, self.quad_state.d_prev, self.quad_state.He, mat, self.dt)
+                loss, _ = self._phasefield_loss(pf_batch, self.quad_state.d_prev, self.quad_state.He)
                 return loss
 
             self._run_adam(opt_d_adam, d_loss_fn, c.adam_epochs_d)
@@ -132,9 +162,7 @@ class CoupledTrainer:
             self._run_lbfgs(opt_d_lbfgs, d_loss_fn)
 
             with torch.no_grad():
-                _, d_new = phasefield_loss(
-                    self.net_d, pf_batch, self.quad_state.d_prev, self.quad_state.He, mat, self.dt
-                )
+                _, d_new = self._phasefield_loss(pf_batch, self.quad_state.d_prev, self.quad_state.He)
 
             # Step 4: store and pass to next step
             self.quad_state.d_prev = d_new.detach()
