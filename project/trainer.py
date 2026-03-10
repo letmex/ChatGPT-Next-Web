@@ -157,7 +157,9 @@ class CoupledTrainer:
             opt_tu_adam = torch.optim.Adam(self.net_tu.parameters(), lr=c.adam_lr)
 
             def tu_loss_fn():
-                loss, _ = thermo_mech_total_loss(self.net_tu, batch, d_tm, mat, (c.w_T, c.w_u))
+                loss, _ = thermo_mech_total_loss(
+                    self.net_tu, batch, d_tm, mat, (c.w_T, c.w_u), mode=c.mech_mode
+                )
                 return loss
 
             self._run_adam(opt_tu_adam, tu_loss_fn, c.adam_epochs_tu)

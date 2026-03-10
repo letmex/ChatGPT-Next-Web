@@ -66,6 +66,42 @@ def strain_energies(exx, eyy, exy, ezz, lam, mu, eps_r):
     return psi_plus, psi_minus
 
 
+def split_stresses(exx, eyy, exy, ezz, lam, mu):
+    tr_e = exx + eyy + ezz
+    tr_p = positive(tr_e)
+
+    em = 0.5 * (exx + eyy)
+    ed = 0.5 * (exx - eyy)
+    r = torch.sqrt(ed**2 + exy**2 + 1e-12)
+    e1 = em + r
+    e2 = em - r
+    e3 = ezz
+
+    e1p = positive(e1)
+    e2p = positive(e2)
+    e3p = positive(e3)
+
+    chi = ed / r
+    eta = exy / r
+    exxp = 0.5 * (e1p + e2p) + 0.5 * (e1p - e2p) * chi
+    eyyp = 0.5 * (e1p + e2p) - 0.5 * (e1p - e2p) * chi
+    exyp = 0.5 * (e1p - e2p) * eta
+    ezzp = e3p
+
+    spxx = lam * tr_p + 2.0 * mu * exxp
+    spyy = lam * tr_p + 2.0 * mu * eyyp
+    spxy = 2.0 * mu * exyp
+
+    sxx = lam * tr_e + 2.0 * mu * exx
+    syy = lam * tr_e + 2.0 * mu * eyy
+    sxy = 2.0 * mu * exy
+
+    smxx = sxx - spxx
+    smyy = syy - spyy
+    smxy = sxy - spxy
+    return (spxx, spyy, spxy), (smxx, smyy, smxy)
+
+
 def mechanical_potential_loss(net_tu, xyt_q, w_q, d_prev, mat):
     xyt_q = xyt_q.requires_grad_(True)
     T, u = net_tu(xyt_q)
@@ -80,18 +116,42 @@ def mechanical_potential_loss(net_tu, xyt_q, w_q, d_prev, mat):
     return Pi_u
 
 
+def stress_correction_loss(net_tu, xyt_q, w_q, d_prev, mat):
+    xyt_q = xyt_q.requires_grad_(True)
+    T, u = net_tu(xyt_q)
+    lam, mu = lame_constants(mat.E, mat.nu)
+
+    exx, eyy, exy, ezz = elastic_strain_plane_stress(u, T, xyt_q, mat.alpha, mat.T_ref, mat.nu)
+    (spxx, spyy, spxy), (smxx, smyy, smxy) = split_stresses(exx, eyy, exy, ezz, lam, mu)
+
+    g = degradation(d_prev, mat.kappa)
+    sxx = smxx + g * spxx
+    syy = smyy + g * spyy
+    sxy = smxy + g * spxy
+
+    div_x = grad(sxx, xyt_q)[:, 0:1] + grad(sxy, xyt_q)[:, 1:2]
+    div_y = grad(sxy, xyt_q)[:, 0:1] + grad(syy, xyt_q)[:, 1:2]
+    res = div_x**2 + div_y**2
+    return torch.sum(w_q * res)
+
+
 def displacement_bc_loss(net_tu, xyt_bc, u_bar):
     _, u = net_tu(xyt_bc)
     return torch.mean((u - u_bar) ** 2)
 
 
-def thermo_mech_total_loss(net_tu, batch, d_prev, mat, weights):
+def thermo_mech_total_loss(net_tu, batch, d_prev, mat, weights, mode="energy_split"):
+    if mode not in {"energy_split", "stress_correction"}:
+        raise ValueError(f"Unsupported mechanical mode: {mode}")
     L_heat = (
         heat_residual_loss(net_tu, batch["domain"], d_prev, mat)
         + temperature_bc_loss(net_tu, batch["bc_T"], batch["T_bar"])
         + temperature_init_loss(net_tu, batch["init"], batch["T0"])
     )
-    L_u = mechanical_potential_loss(net_tu, batch["quad"], batch["w_q"], d_prev, mat) + displacement_bc_loss(
-        net_tu, batch["bc_u"], batch["u_bar"]
-    )
+    if mode == "energy_split":
+        L_u_mech = mechanical_potential_loss(net_tu, batch["quad"], batch["w_q"], d_prev, mat)
+    else:
+        L_u_mech = stress_correction_loss(net_tu, batch["quad"], batch["w_q"], d_prev, mat)
+
+    L_u = L_u_mech + displacement_bc_loss(net_tu, batch["bc_u"], batch["u_bar"])
     return weights[0] * L_heat + weights[1] * L_u, {"L_heat": L_heat, "L_u": L_u}

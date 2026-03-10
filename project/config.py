@@ -36,6 +36,7 @@ class TrainConfig:
 
     w_T: float = 1.0
     w_u: float = 1.0
+    mech_mode: str = "stress_correction"
 
     n_domain: int = 5000
     n_boundary: int = 1000
