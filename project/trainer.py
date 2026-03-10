@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from inspect import signature
 from typing import Callable, Dict
 
 import torch
@@ -41,6 +42,8 @@ class CoupledTrainer:
         self.sampler = Sampler(domain, self.device)
         self.dt = (cfg.train.tf - cfg.train.t0) / cfg.train.num_time_steps
         self.irreversibility = getattr(cfg.train, "irreversibility", True)
+        self._phasefield_supports_irreversibility = "irreversibility" in signature(phasefield_loss).parameters
+        self._thermo_mech_supports_mode = "mode" in signature(thermo_mech_total_loss).parameters
 
         # Main state grid: sampled once and reused for all time steps.
         q0, w0 = self.sampler.sample_quadrature(cfg.train.n_quadrature, cfg.train.t0)
@@ -204,7 +207,7 @@ class CoupledTrainer:
         return {"quad": q_fixed, "w_q": self.quad_state.w_q}
 
     def _phasefield_loss(self, batch: Dict[str, torch.Tensor], d_prev: torch.Tensor, He: torch.Tensor):
-        try:
+        if self._phasefield_supports_irreversibility:
             return phasefield_loss(
                 self.net_d,
                 batch,
@@ -214,18 +217,13 @@ class CoupledTrainer:
                 self.dt,
                 irreversibility=self.irreversibility,
             )
-        except TypeError:
-            # Backward compatibility with phasefield_loss without irreversibility keyword.
-            return phasefield_loss(self.net_d, batch, d_prev, He, self.cfg.material, self.dt)
+        return phasefield_loss(self.net_d, batch, d_prev, He, self.cfg.material, self.dt)
 
     def _thermo_mech_loss(self, batch: Dict[str, torch.Tensor], d_prev: torch.Tensor, mat, weights):
         mech_mode = getattr(self.cfg.train, "mech_mode", None)
-        if mech_mode is None:
-            return thermo_mech_total_loss(self.net_tu, batch, d_prev, mat, weights)
-        try:
+        if mech_mode is not None and self._thermo_mech_supports_mode:
             return thermo_mech_total_loss(self.net_tu, batch, d_prev, mat, weights, mode=mech_mode)
-        except TypeError:
-            return thermo_mech_total_loss(self.net_tu, batch, d_prev, mat, weights)
+        return thermo_mech_total_loss(self.net_tu, batch, d_prev, mat, weights)
 
     def train(self):
         mat = self.cfg.material
