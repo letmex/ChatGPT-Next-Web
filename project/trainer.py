@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict
+from typing import Callable, Dict
 
 import torch
 
@@ -54,29 +54,126 @@ class CoupledTrainer:
             He=zeros.clone(),
         )
 
-    def _build_batch(self, t: float) -> Dict[str, torch.Tensor]:
+    def _interpolate_heating_curve(self, t: torch.Tensor) -> torch.Tensor:
+        load_cfg = getattr(self.cfg, "load", None)
+        thermal_cfg = getattr(load_cfg, "thermal", None)
+        if thermal_cfg is None:
+            return torch.zeros_like(t)
+
+        curve = getattr(thermal_cfg, "heating_curve", [])
+        initial_temperature = float(getattr(thermal_cfg, "initial_temperature", 0.0))
+        if len(curve) == 0:
+            return torch.full_like(t, initial_temperature)
+
+        t_scalar = t[:, 0:1]
+        t_out = torch.empty_like(t_scalar)
+
+        if len(curve) == 1:
+            t_out.fill_(float(curve[0][1]))
+            return t_out
+
+        t0, v0 = curve[0]
+        t_out[t_scalar <= t0] = float(v0)
+
+        for i in range(len(curve) - 1):
+            ta, va = curve[i]
+            tb, vb = curve[i + 1]
+            seg = (t_scalar >= ta) & (t_scalar <= tb)
+            ratio = (t_scalar[seg] - ta) / max(tb - ta, 1e-12)
+            t_out[seg] = va + ratio * (vb - va)
+
+        t_last, v_last = curve[-1]
+        t_out[t_scalar >= t_last] = float(v_last)
+        return t_out
+
+    def _default_temperature_bc_fn(self, xyt_bc: torch.Tensor, bc_labels: torch.Tensor | None) -> torch.Tensor:
+        load_cfg = getattr(self.cfg, "load", None)
+        thermal_cfg = getattr(load_cfg, "thermal", None)
+        tags = getattr(thermal_cfg, "thermal_bc_tags", None)
+        tag_map = getattr(self.sampler, "BOUNDARY_TAG_TO_ID", None)
+        if bc_labels is None or thermal_cfg is None or not tags or tag_map is None:
+            return torch.zeros((xyt_bc.shape[0], 1), device=self.device)
+
+        target = torch.zeros((xyt_bc.shape[0], 1), device=self.device)
+        t_curve = self._interpolate_heating_curve(xyt_bc[:, 2:3])
+
+        for tag in tags:
+            if tag not in tag_map:
+                continue
+            tag_id = tag_map[tag]
+            mask = bc_labels.squeeze(-1) == tag_id
+            target[mask] = t_curve[mask]
+        return target
+
+    def _default_temperature_init_fn(self, xyt_init: torch.Tensor) -> torch.Tensor:
+        load_cfg = getattr(self.cfg, "load", None)
+        thermal_cfg = getattr(load_cfg, "thermal", None)
+        initial_temperature = float(getattr(thermal_cfg, "initial_temperature", 0.0))
+        return torch.full((xyt_init.shape[0], 1), initial_temperature, device=self.device)
+
+    def _default_displacement_bc_fn(self, xyt_bc: torch.Tensor, bc_labels: torch.Tensor | None) -> torch.Tensor:
+        load_cfg = getattr(self.cfg, "load", None)
+        mech_cfg = getattr(load_cfg, "mechanical", None)
+        constraints = getattr(mech_cfg, "displacement_constraints", None)
+        tag_map = getattr(self.sampler, "BOUNDARY_TAG_TO_ID", None)
+        if bc_labels is None or mech_cfg is None or constraints is None or tag_map is None:
+            return torch.zeros((xyt_bc.shape[0], 2), device=self.device)
+
+        u_target = torch.zeros((xyt_bc.shape[0], 2), device=self.device)
+        u0 = getattr(mech_cfg, "prescribed_displacement", (0.0, 0.0))
+
+        for tag, constrained in constraints.items():
+            if tag not in tag_map:
+                continue
+            tag_id = tag_map[tag]
+            mask = bc_labels.squeeze(-1) == tag_id
+            if constrained[0]:
+                u_target[mask, 0] = u0[0]
+            if constrained[1]:
+                u_target[mask, 1] = u0[1]
+        return u_target
+
+    def _build_batch(
+        self,
+        t: float,
+        temperature_bc_fn: Callable[[torch.Tensor, torch.Tensor | None], torch.Tensor] | None = None,
+        temperature_init_fn: Callable[[torch.Tensor], torch.Tensor] | None = None,
+        displacement_bc_fn: Callable[[torch.Tensor, torch.Tensor | None], torch.Tensor] | None = None,
+    ) -> Dict[str, torch.Tensor]:
         c = self.cfg.train
 
         bc_T_sample = self.sampler.sample_boundary(c.n_boundary, t)
         bc_u_sample = self.sampler.sample_boundary(c.n_boundary, t)
-        bc_T = bc_T_sample[0] if isinstance(bc_T_sample, tuple) else bc_T_sample
-        bc_u = bc_u_sample[0] if isinstance(bc_u_sample, tuple) else bc_u_sample
-        xyt_init = self.sampler.sample_initial(c.n_initial, self.cfg.train.t0)
+
+        if isinstance(bc_T_sample, tuple):
+            bc_T, bc_T_labels = bc_T_sample
+        else:
+            bc_T, bc_T_labels = bc_T_sample, None
+
+        if isinstance(bc_u_sample, tuple):
+            bc_u, bc_u_labels = bc_u_sample
+        else:
+            bc_u, bc_u_labels = bc_u_sample, None
 
         batch = {
             "domain": self.sampler.sample_domain(c.n_domain, t),
             "bc_T": bc_T,
+            "bc_T_labels": bc_T_labels,
             "bc_u": bc_u,
-            "init": xyt_init,
+            "bc_u_labels": bc_u_labels,
+            "init": self.sampler.sample_initial(c.n_initial, self.cfg.train.t0),
         }
         q, w_q = self.sampler.sample_quadrature(c.n_quadrature, t)
         batch["quad"] = q
         batch["w_q"] = w_q
 
-        # Placeholder BC/IC data hooks
-        batch["T_bar"] = torch.zeros((batch["bc_T"].shape[0], 1), device=self.device)
-        batch["T0"] = torch.zeros((batch["init"].shape[0], 1), device=self.device)
-        batch["u_bar"] = torch.zeros((batch["bc_u"].shape[0], 2), device=self.device)
+        temperature_bc_fn = temperature_bc_fn or self._default_temperature_bc_fn
+        temperature_init_fn = temperature_init_fn or self._default_temperature_init_fn
+        displacement_bc_fn = displacement_bc_fn or self._default_displacement_bc_fn
+
+        batch["T_bar"] = temperature_bc_fn(batch["bc_T"], batch["bc_T_labels"])
+        batch["T0"] = temperature_init_fn(batch["init"])
+        batch["u_bar"] = displacement_bc_fn(batch["bc_u"], batch["bc_u_labels"])
         return batch
 
     def _run_adam(self, optimizer, closure_fn, epochs: int):
@@ -118,6 +215,15 @@ class CoupledTrainer:
             # Backward compatibility with phasefield_loss without irreversibility keyword.
             return phasefield_loss(self.net_d, batch, d_prev, He, self.cfg.material, self.dt)
 
+    def _thermo_mech_loss(self, batch: Dict[str, torch.Tensor], d_prev: torch.Tensor, mat, weights):
+        mech_mode = getattr(self.cfg.train, "mech_mode", None)
+        if mech_mode is None:
+            return thermo_mech_total_loss(self.net_tu, batch, d_prev, mat, weights)
+        try:
+            return thermo_mech_total_loss(self.net_tu, batch, d_prev, mat, weights, mode=mech_mode)
+        except TypeError:
+            return thermo_mech_total_loss(self.net_tu, batch, d_prev, mat, weights)
+
     def train(self):
         mat = self.cfg.material
         c = self.cfg.train
@@ -135,7 +241,7 @@ class CoupledTrainer:
             opt_tu_adam = torch.optim.Adam(self.net_tu.parameters(), lr=c.adam_lr)
 
             def tu_loss_fn():
-                loss, _ = thermo_mech_total_loss(self.net_tu, batch, d_tm, mat, (c.w_T, c.w_u))
+                loss, _ = self._thermo_mech_loss(batch, d_tm, mat, (c.w_T, c.w_u))
                 return loss
 
             self._run_adam(opt_tu_adam, tu_loss_fn, c.adam_epochs_tu)
