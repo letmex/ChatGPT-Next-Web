@@ -33,13 +33,13 @@ def temperature_init_loss(net_tu, xyt_init, T0):
     return torch.mean((T - T0) ** 2)
 
 
-def strain_energies(exx, eyy, exy, ezz, lam, mu):
+def strain_energies(exx, eyy, exy, ezz, lam, mu, eps_r):
     tr_e = exx + eyy + ezz
     tr_p = positive(tr_e)
 
     em = 0.5 * (exx + eyy)
     ed = 0.5 * (exx - eyy)
-    r = torch.sqrt(ed**2 + exy**2 + 1e-12)
+    r = torch.sqrt(ed**2 + exy**2 + eps_r**2)
     e1 = em + r
     e2 = em - r
     e3 = ezz
@@ -72,7 +72,7 @@ def mechanical_potential_loss(net_tu, xyt_q, w_q, d_prev, mat):
     lam, mu = lame_constants(mat.E, mat.nu)
 
     exx, eyy, exy, ezz = elastic_strain_plane_stress(u, T, xyt_q, mat.alpha, mat.T_ref, mat.nu)
-    psi_plus, psi_minus = strain_energies(exx, eyy, exy, ezz, lam, mu)
+    psi_plus, psi_minus = strain_energies(exx, eyy, exy, ezz, lam, mu, mat.eps_r)
 
     g = degradation(d_prev, mat.kappa)
     density = g * psi_plus + psi_minus

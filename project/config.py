@@ -16,7 +16,7 @@ class MaterialConfig:
     l0: float = 1e-3
     eta_pf: float = 1e-4
     kappa: float = 1e-8
-    eps_r: float = 1e-12
+    eps_r: float = 1e-5
 
     Q: float = 0.0
 
