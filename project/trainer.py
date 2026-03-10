@@ -91,12 +91,15 @@ class CoupledTrainer:
         thermal_cfg = getattr(load_cfg, "thermal", None)
         tags = getattr(thermal_cfg, "thermal_bc_tags", None)
         tag_map = getattr(self.sampler, "BOUNDARY_TAG_TO_ID", None)
-        if bc_labels is None or thermal_cfg is None or not tags or tag_map is None:
+        if thermal_cfg is None:
             return torch.zeros((xyt_bc.shape[0], 1), device=self.device)
 
-        target = torch.zeros((xyt_bc.shape[0], 1), device=self.device)
         t_curve = self._interpolate_heating_curve(xyt_bc[:, 2:3])
+        if bc_labels is None or not tags or tag_map is None:
+            # Fallback for samplers without boundary labels: apply heating curve to all boundary points.
+            return t_curve
 
+        target = torch.zeros((xyt_bc.shape[0], 1), device=self.device)
         for tag in tags:
             if tag not in tag_map:
                 continue
