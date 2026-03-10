@@ -1,5 +1,4 @@
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Tuple
 
 
 @dataclass
@@ -16,13 +15,12 @@ class MaterialConfig:
     # Gf0 = 0.0024 MPa*mm = 2.4 N/m (SI)
     GcI: float = 2.4
     xi: float = 1.0
-    GcII: Optional[float] = None
+    GcII: float | None = None
     l0: float = 1e-3
     eta_pf: float = 1e-4
     kappa: float = 1e-8
     eps_r: float = 1e-12
 
-    Q: float = 0.0
 
     def __post_init__(self) -> None:
         if self.GcII is None:
@@ -51,6 +49,11 @@ class TrainConfig:
 
 
 @dataclass
+class LoadConfig:
+    Q: float = 0.0
+
+
+@dataclass
 class RuntimeConfig:
     device: str = "cpu"
     dtype: str = "float32"
@@ -61,13 +64,10 @@ class Config:
     material: MaterialConfig = field(default_factory=MaterialConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
+    load: LoadConfig = field(default_factory=LoadConfig)
 
     @classmethod
     def from_case(cls, case: str) -> "Config":
-        case_builders: Dict[str, Tuple[MaterialConfig]] = {
-            "comsol_baseline": (MaterialConfig(),),
-        }
-        if case not in case_builders:
-            raise ValueError(f"Unknown config case: {case}")
-        material, = case_builders[case]
-        return cls(material=material)
+        if case == "comsol_baseline":
+            return cls(material=MaterialConfig())
+        raise ValueError(f"Unknown config case: {case}")
