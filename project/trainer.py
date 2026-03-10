@@ -30,6 +30,7 @@ class CoupledTrainer:
 
         self.sampler = Sampler(domain, self.device)
         self.dt = (cfg.train.tf - cfg.train.t0) / cfg.train.num_time_steps
+        self.irreversibility = cfg.train.irreversibility
 
     def _build_batch(self, t: float) -> Dict[str, torch.Tensor]:
         c = self.cfg.train
@@ -77,6 +78,8 @@ class CoupledTrainer:
 
         history = []
 
+        print(f"[CoupledTrainer] irreversibility strategy: {self.irreversibility}")
+
         for n in range(c.num_time_steps):
             t_np1 = c.t0 + (n + 1) * self.dt
             batch = self._build_batch(t_np1)
@@ -101,7 +104,15 @@ class CoupledTrainer:
             opt_d_adam = torch.optim.Adam(self.net_d.parameters(), lr=c.adam_lr)
 
             def d_loss_fn():
-                loss, _ = phasefield_loss(self.net_d, batch, d_prev, He, mat, self.dt)
+                loss, _ = phasefield_loss(
+                    self.net_d,
+                    batch,
+                    d_prev,
+                    He,
+                    mat,
+                    self.dt,
+                    irreversibility=self.irreversibility,
+                )
                 return loss
 
             self._run_adam(opt_d_adam, d_loss_fn, c.adam_epochs_d)
@@ -109,7 +120,15 @@ class CoupledTrainer:
             self._run_lbfgs(opt_d_lbfgs, d_loss_fn)
 
             with torch.no_grad():
-                _, d_new = phasefield_loss(self.net_d, batch, d_prev, He, mat, self.dt)
+                _, d_new = phasefield_loss(
+                    self.net_d,
+                    batch,
+                    d_prev,
+                    He,
+                    mat,
+                    self.dt,
+                    irreversibility=self.irreversibility,
+                )
 
             # Step 4: store and pass to next step
             d_prev = d_new.detach()
