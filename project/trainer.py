@@ -139,6 +139,12 @@ class CoupledTrainer:
                 u_target[mask, 1] = u0[1]
         return u_target
 
+    def _sample_boundary_with_optional_labels(self, n: int, t: float):
+        sample = self.sampler.sample_boundary(n, t)
+        if isinstance(sample, tuple):
+            return sample
+        return sample, None
+
     def _build_batch(
         self,
         t: float,
@@ -148,18 +154,8 @@ class CoupledTrainer:
     ) -> Dict[str, torch.Tensor]:
         c = self.cfg.train
 
-        bc_T_sample = self.sampler.sample_boundary(c.n_boundary, t)
-        bc_u_sample = self.sampler.sample_boundary(c.n_boundary, t)
-
-        if isinstance(bc_T_sample, tuple):
-            bc_T, bc_T_labels = bc_T_sample
-        else:
-            bc_T, bc_T_labels = bc_T_sample, None
-
-        if isinstance(bc_u_sample, tuple):
-            bc_u, bc_u_labels = bc_u_sample
-        else:
-            bc_u, bc_u_labels = bc_u_sample, None
+        bc_T, bc_T_labels = self._sample_boundary_with_optional_labels(c.n_boundary, t)
+        bc_u, bc_u_labels = self._sample_boundary_with_optional_labels(c.n_boundary, t)
 
         batch = {
             "domain": self.sampler.sample_domain(c.n_domain, t),
