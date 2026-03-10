@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Dict, Optional, Tuple
 
 
 @dataclass
@@ -64,6 +64,10 @@ class Config:
 
     @classmethod
     def from_case(cls, case: str) -> "Config":
-        if case == "comsol_baseline":
-            return cls(material=MaterialConfig())
-        raise ValueError(f"Unknown config case: {case}")
+        case_builders: Dict[str, Tuple[MaterialConfig]] = {
+            "comsol_baseline": (MaterialConfig(),),
+        }
+        if case not in case_builders:
+            raise ValueError(f"Unknown config case: {case}")
+        material, = case_builders[case]
+        return cls(material=material)
