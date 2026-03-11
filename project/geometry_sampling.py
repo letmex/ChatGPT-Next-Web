@@ -58,6 +58,34 @@ class Sampler:
         )
         return torch.cat([xy, tt], dim=1), labels
 
+
+    def sample_boundary_by_tag(self, n: int, t: float, tag: str):
+        if tag not in self.BOUNDARY_TAG_TO_ID:
+            raise ValueError(f"Unknown boundary tag: {tag}")
+
+        n_pts = max(int(n), 1)
+        if tag in {"left", "right"}:
+            y = torch.rand(n_pts, 1, device=self.device) * (self.domain.y_max - self.domain.y_min) + self.domain.y_min
+            x_val = self.domain.x_min if tag == "left" else self.domain.x_max
+            x = torch.full_like(y, x_val)
+        else:
+            x = torch.rand(n_pts, 1, device=self.device) * (self.domain.x_max - self.domain.x_min) + self.domain.x_min
+            y_val = self.domain.y_min if tag == "bottom" else self.domain.y_max
+            y = torch.full_like(x, y_val)
+
+        xy = torch.cat([x, y], dim=1)
+        tt = torch.full((n_pts, 1), float(t), device=self.device)
+        labels = torch.full((n_pts, 1), self.BOUNDARY_TAG_TO_ID[tag], device=self.device, dtype=torch.long)
+        return torch.cat([xy, tt], dim=1), labels
+
+    def sample_split_boundaries(self, n: int, t: float, tags: tuple[str, ...] | None = None):
+        tags = tags or tuple(self.BOUNDARY_TAG_TO_ID.keys())
+        n_side = max(n // max(len(tags), 1), 1)
+        out: Dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+        for tag in tags:
+            out[tag] = self.sample_boundary_by_tag(n_side, t, tag)
+        return out
+
     def sample_quadrature(self, n: int, t: float):
         # Simple MC quadrature points + unit weights scaled by area
         pts = self.sample_domain(n, t)

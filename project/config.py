@@ -22,7 +22,6 @@ class MaterialConfig:
     kappa: float = 1e-8
     eps_r: float = 1e-5
 
-
     def __post_init__(self) -> None:
         if self.GcII is None:
             self.GcII = 2.0 * (1.0 + self.nu) * (self.xi**2) * self.GcI
@@ -52,22 +51,24 @@ class TrainConfig:
 
 
 @dataclass
-class LoadConfig:
-    Q: float = 0.0
-
-
-@dataclass
-class RuntimeConfig:
-    device: str = "cpu"
-    dtype: str = "float32"
+class TimeFunctionConfig:
+    kind: str = "piecewise_linear"
+    # normalized value-time control points [(t, value), ...]
+    points: Tuple[Tuple[float, float], ...] = ((0.0, 0.0), (1.0, 1.0))
+    scale: float = 1.0
+    offset: float = 0.0
 
 
 @dataclass
 class ThermalLoadConfig:
     initial_temperature: float = 573.15
-    # Piecewise-linear temperature-time curve [(t, T), ...]
+    # default: keep old behavior, apply heating curve on selected boundaries
     heating_curve: Tuple[Tuple[float, float], ...] = ((0.0, 573.15), (1.0, 573.15))
     thermal_bc_tags: Tuple[str, ...] = ("top",)
+
+    # Optional per-side constants / amplitudes for T_bar
+    boundary_temperature: Dict[str, float] = field(default_factory=dict)
+    boundary_temperature_amplitude: Dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -78,11 +79,28 @@ class MechanicalLoadConfig:
     )
     prescribed_displacement: Tuple[float, float] = (0.0, 0.0)
 
+    # Optional per-side constants / amplitudes for u_bar
+    boundary_displacement: Dict[str, Tuple[float, float]] = field(default_factory=dict)
+    boundary_displacement_amplitude: Dict[str, Tuple[float, float]] = field(default_factory=dict)
+
 
 @dataclass
 class LoadConfig:
+    # Temperature field bounds for output transforms or clipping in user logic.
+    temperature_bounds: Tuple[float, float] = (273.15, 2000.0)
+    displacement_bounds: Tuple[Tuple[float, float], Tuple[float, float]] = (
+        (-1e-3, -1e-3),
+        (1e-3, 1e-3),
+    )
+    time_function: TimeFunctionConfig = field(default_factory=TimeFunctionConfig)
     thermal: ThermalLoadConfig = field(default_factory=ThermalLoadConfig)
     mechanical: MechanicalLoadConfig = field(default_factory=MechanicalLoadConfig)
+
+
+@dataclass
+class RuntimeConfig:
+    device: str = "cpu"
+    dtype: str = "float32"
 
 
 @dataclass

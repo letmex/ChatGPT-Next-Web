@@ -143,15 +143,29 @@ def displacement_bc_loss(net_tu, xyt_bc, u_bar):
 def thermo_mech_total_loss(net_tu, batch, d_prev, mat, weights, mode="energy_split"):
     if mode not in {"energy_split", "stress_correction"}:
         raise ValueError(f"Unsupported mechanical mode: {mode}")
-    L_heat = (
-        heat_residual_loss(net_tu, batch["domain"], d_prev, mat)
-        + temperature_bc_loss(net_tu, batch["bc_T"], batch["T_bar"])
-        + temperature_init_loss(net_tu, batch["init"], batch["T0"])
+
+    if "bc_T_split" in batch and "T_bar_split" in batch:
+        L_T_bc = 0.0
+        for tag, (xyt_bc, _) in batch["bc_T_split"].items():
+            L_T_bc = L_T_bc + temperature_bc_loss(net_tu, xyt_bc, batch["T_bar_split"][tag])
+    else:
+        L_T_bc = temperature_bc_loss(net_tu, batch["bc_T"], batch["T_bar"])
+
+    L_heat = heat_residual_loss(net_tu, batch["domain"], d_prev, mat) + L_T_bc + temperature_init_loss(
+        net_tu, batch["init"], batch["T0"]
     )
+
     if mode == "energy_split":
         L_u_mech = mechanical_potential_loss(net_tu, batch["quad"], batch["w_q"], d_prev, mat)
     else:
         L_u_mech = stress_correction_loss(net_tu, batch["quad"], batch["w_q"], d_prev, mat)
 
-    L_u = L_u_mech + displacement_bc_loss(net_tu, batch["bc_u"], batch["u_bar"])
+    if "bc_u_split" in batch and "u_bar_split" in batch:
+        L_u_bc = 0.0
+        for tag, (xyt_bc, _) in batch["bc_u_split"].items():
+            L_u_bc = L_u_bc + displacement_bc_loss(net_tu, xyt_bc, batch["u_bar_split"][tag])
+    else:
+        L_u_bc = displacement_bc_loss(net_tu, batch["bc_u"], batch["u_bar"])
+
+    L_u = L_u_mech + L_u_bc
     return weights[0] * L_heat + weights[1] * L_u, {"L_heat": L_heat, "L_u": L_u}

@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Callable, Dict
 
+
 import torch
 
 from .config import Config
@@ -32,10 +33,9 @@ class CoupledTrainer:
         self.dt = (cfg.train.tf - cfg.train.t0) / cfg.train.num_time_steps
         self.irreversibility = cfg.train.irreversibility
 
-    def _interpolate_heating_curve(self, t: torch.Tensor) -> torch.Tensor:
-        curve = self.cfg.load.thermal.heating_curve
+    def _interpolate_curve(self, t: torch.Tensor, curve) -> torch.Tensor:
         if len(curve) == 0:
-            return torch.full_like(t, self.cfg.load.thermal.initial_temperature)
+            return torch.zeros_like(t)
 
         t_scalar = t[:, 0:1]
         t_out = torch.empty_like(t_scalar)
@@ -58,30 +58,57 @@ class CoupledTrainer:
         t_out[t_scalar >= t_last] = float(v_last)
         return t_out
 
+    def _load_time_factor(self, t: torch.Tensor) -> torch.Tensor:
+        tf_cfg = self.cfg.load.time_function
+        values = self._interpolate_curve(t, tf_cfg.points)
+        return tf_cfg.offset + tf_cfg.scale * values
+
+    def _interpolate_heating_curve(self, t: torch.Tensor) -> torch.Tensor:
+        curve = self.cfg.load.thermal.heating_curve
+        if len(curve) == 0:
+            return torch.full_like(t, self.cfg.load.thermal.initial_temperature)
+        return self._interpolate_curve(t, curve)
+
     def _default_temperature_bc_fn(self, xyt_bc: torch.Tensor, bc_labels: torch.Tensor) -> torch.Tensor:
         target = torch.zeros((xyt_bc.shape[0], 1), device=self.device)
         t_curve = self._interpolate_heating_curve(xyt_bc[:, 2:3])
+        load_factor = self._load_time_factor(xyt_bc[:, 2:3])
 
         for tag in self.cfg.load.thermal.thermal_bc_tags:
             tag_id = self.sampler.BOUNDARY_TAG_TO_ID[tag]
             mask = bc_labels.squeeze(-1) == tag_id
-            target[mask] = t_curve[mask]
-        return target
+            base = self.cfg.load.thermal.boundary_temperature.get(tag, 0.0)
+            amp = self.cfg.load.thermal.boundary_temperature_amplitude.get(tag, 1.0)
+            target[mask] = base + amp * load_factor[mask] * t_curve[mask]
+
+        t_min, t_max = self.cfg.load.temperature_bounds
+        return torch.clamp(target, min=t_min, max=t_max)
 
     def _default_temperature_init_fn(self, xyt_init: torch.Tensor) -> torch.Tensor:
-        return torch.full((xyt_init.shape[0], 1), self.cfg.load.thermal.initial_temperature, device=self.device)
+        t0 = torch.full((xyt_init.shape[0], 1), self.cfg.load.thermal.initial_temperature, device=self.device)
+        t_min, t_max = self.cfg.load.temperature_bounds
+        return torch.clamp(t0, min=t_min, max=t_max)
 
     def _default_displacement_bc_fn(self, xyt_bc: torch.Tensor, bc_labels: torch.Tensor) -> torch.Tensor:
         u_target = torch.zeros((xyt_bc.shape[0], 2), device=self.device)
         u0 = self.cfg.load.mechanical.prescribed_displacement
+        load_factor = self._load_time_factor(xyt_bc[:, 2:3])
 
         for tag, constrained in self.cfg.load.mechanical.displacement_constraints.items():
             tag_id = self.sampler.BOUNDARY_TAG_TO_ID[tag]
             mask = bc_labels.squeeze(-1) == tag_id
+            base = self.cfg.load.mechanical.boundary_displacement.get(tag, u0)
+            amp = self.cfg.load.mechanical.boundary_displacement_amplitude.get(tag, (1.0, 1.0))
+            ux = base[0] + amp[0] * load_factor[mask, 0]
+            uy = base[1] + amp[1] * load_factor[mask, 0]
             if constrained[0]:
-                u_target[mask, 0] = u0[0]
+                u_target[mask, 0] = ux
             if constrained[1]:
-                u_target[mask, 1] = u0[1]
+                u_target[mask, 1] = uy
+
+        (ux_min, uy_min), (ux_max, uy_max) = self.cfg.load.displacement_bounds
+        u_target[:, 0] = torch.clamp(u_target[:, 0], min=ux_min, max=ux_max)
+        u_target[:, 1] = torch.clamp(u_target[:, 1], min=uy_min, max=uy_max)
         return u_target
 
     def _build_batch(
@@ -94,6 +121,12 @@ class CoupledTrainer:
         c = self.cfg.train
         bc_T, bc_T_labels = self.sampler.sample_boundary(c.n_boundary, t)
         bc_u, bc_u_labels = self.sampler.sample_boundary(c.n_boundary, t)
+        split_bc_T = self.sampler.sample_split_boundaries(c.n_boundary, t, self.cfg.load.thermal.thermal_bc_tags)
+        split_bc_u = self.sampler.sample_split_boundaries(
+            c.n_boundary,
+            t,
+            tuple(self.cfg.load.mechanical.displacement_constraints.keys()),
+        )
         xyt_init = self.sampler.sample_initial(c.n_initial, self.cfg.train.t0)
 
         batch = {
@@ -102,6 +135,8 @@ class CoupledTrainer:
             "bc_T_labels": bc_T_labels,
             "bc_u": bc_u,
             "bc_u_labels": bc_u_labels,
+            "bc_T_split": split_bc_T,
+            "bc_u_split": split_bc_u,
             "init": xyt_init,
         }
         q, w_q = self.sampler.sample_quadrature(c.n_quadrature, t)
@@ -115,6 +150,15 @@ class CoupledTrainer:
         batch["T_bar"] = temperature_bc_fn(batch["bc_T"], batch["bc_T_labels"])
         batch["T0"] = temperature_init_fn(batch["init"])
         batch["u_bar"] = displacement_bc_fn(batch["bc_u"], batch["bc_u_labels"])
+
+        batch["T_bar_split"] = {
+            tag: temperature_bc_fn(pts, labels)
+            for tag, (pts, labels) in batch["bc_T_split"].items()
+        }
+        batch["u_bar_split"] = {
+            tag: displacement_bc_fn(pts, labels)
+            for tag, (pts, labels) in batch["bc_u_split"].items()
+        }
         return batch
 
     def _run_adam(self, optimizer, closure_fn, epochs: int):
