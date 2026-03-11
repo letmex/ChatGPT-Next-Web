@@ -3,7 +3,7 @@ import torch
 from .utils import degradation, elastic_strain_plane_stress, grad, lame_constants, positive
 
 
-def heat_residual_loss(net_tu, xyt_domain, d_prev, mat):
+def heat_residual_loss(net_tu, xyt_domain, d_prev, mat, Q):
     xyt_domain = xyt_domain.requires_grad_(True)
     T, _ = net_tu(xyt_domain)
 
@@ -19,7 +19,7 @@ def heat_residual_loss(net_tu, xyt_domain, d_prev, mat):
     qy = k_eff * T_y
 
     div_q = grad(qx, xyt_domain)[:, 0:1] + grad(qy, xyt_domain)[:, 1:2]
-    res = mat.rho * mat.c_p * T_t - div_q - mat.Q
+    res = mat.rho * mat.c_p * T_t - div_q - Q
     return torch.mean(res**2)
 
 
@@ -140,11 +140,11 @@ def displacement_bc_loss(net_tu, xyt_bc, u_bar):
     return torch.mean((u - u_bar) ** 2)
 
 
-def thermo_mech_total_loss(net_tu, batch, d_prev, mat, weights, mode="energy_split"):
+def thermo_mech_total_loss(net_tu, batch, d_prev, mat, weights, Q, mode="energy_split"):
     if mode not in {"energy_split", "stress_correction"}:
         raise ValueError(f"Unsupported mechanical mode: {mode}")
     L_heat = (
-        heat_residual_loss(net_tu, batch["domain"], d_prev, mat)
+        heat_residual_loss(net_tu, batch["domain"], d_prev, mat, Q)
         + temperature_bc_loss(net_tu, batch["bc_T"], batch["T_bar"])
         + temperature_init_loss(net_tu, batch["init"], batch["T0"])
     )

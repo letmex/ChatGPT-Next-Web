@@ -158,7 +158,7 @@ class CoupledTrainer:
 
             def tu_loss_fn():
                 loss, _ = thermo_mech_total_loss(
-                    self.net_tu, batch, d_tm, mat, (c.w_T, c.w_u), mode=c.mech_mode
+                    self.net_tu, batch, d_tm, mat, (c.w_T, c.w_u), self.cfg.load.Q, mode=c.mech_mode
                 )
                 return loss
 
