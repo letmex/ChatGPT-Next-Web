@@ -5,7 +5,7 @@ import torch
 
 from .config import Config
 from .geometry_sampling import RectDomain, Sampler
-from .history_update import update_history_fields
+from .history_update import assert_history_consistency, update_history_fields
 from .losses_phasefield import phasefield_loss
 from .losses_thermo_mech import thermo_mech_total_loss
 from .networks import PhaseFieldNet, ThermoMechNet
@@ -137,8 +137,10 @@ class CoupledTrainer:
         mat = self.cfg.material
         c = self.cfg.train
 
-        # Background quadrature state for history variables
-        q0, _ = self.sampler.sample_quadrature(c.n_quadrature, c.t0)
+        # Background quadrature state for history variables (fixed spatial grid)
+        q0, w_q = self.sampler.sample_quadrature(c.n_quadrature, c.t0)
+        q_xy = q0[:, :2].detach()
+        q_prev = q0.detach()
         HI = torch.zeros((q0.shape[0], 1), device=self.device)
         HII = torch.zeros((q0.shape[0], 1), device=self.device)
         d_prev = torch.zeros((q0.shape[0], 1), device=self.device)
@@ -150,6 +152,12 @@ class CoupledTrainer:
         for n in range(c.num_time_steps):
             t_np1 = c.t0 + (n + 1) * self.dt
             batch = self._build_batch(t_np1)
+            q_curr = torch.cat(
+                [q_xy, torch.full((q_xy.shape[0], 1), float(t_np1), device=self.device)],
+                dim=1,
+            )
+            batch["quad"] = q_curr
+            batch["w_q"] = w_q
 
             # Step 1: train thermo-mechanical net with frozen d^n
             d_tm = d_prev
@@ -167,7 +175,9 @@ class CoupledTrainer:
             self._run_lbfgs(opt_tu_lbfgs, tu_loss_fn)
 
             # Step 2: update history on quadrature points
+            assert_history_consistency(batch["quad"], q_prev, interpolated=False)
             HI, HII, He = update_history_fields(self.net_tu, batch["quad"], HI, HII, mat)
+            q_prev = batch["quad"].detach()
 
             # Step 3: train phase-field net with fixed H_e^{n+1}
             opt_d_adam = torch.optim.Adam(self.net_d.parameters(), lr=c.adam_lr)
